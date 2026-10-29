@@ -140,19 +140,22 @@ def handle(m):
 @app.route('/')
 def home(): return f"V28 {SYMBOL_CCXT} ${last_price} Trade:{current_trade}"
 
-@app.route(f'/{TELEGRAM_BOT_TOKEN}', methods=['POST'])
-def wh(): 
-    try: bot.process_new_updates([telebot.types.Update.de_json(request.stream.read().decode("utf-8"))])
-    except: pass
-    return "ok",200
-
-@app.route('/setwebhook')
-def setwh():
-    bot.remove_webhook(); time.sleep(1)
-    bot.set_webhook(url=f"{RENDER_URL}/{TELEGRAM_BOT_TOKEN}"); return "Webhook set"
-
-if __name__=='__main__':
-    threading.Thread(target=check_loop,daemon=True).start()
-    try: bot.remove_webhook(); time.sleep(1); bot.set_webhook(url=f"{RENDER_URL}/{TELEGRAM_BOT_TOKEN}")
-    except: pass
-    app.run(host='0.0.0.0',port=int(os.environ.get("PORT",10000)))
+@app.route(f'/{BOT_TOKEN}', methods=['POST'])
+def webhook():
+    try:
+        data = request.get_json()
+        print(f"MSG: {data}", flush=True)
+        if 'message' in data and 'text' in data['message']:
+            chat_id = data['message']['chat']['id']
+            text = data['message']['text']
+            # TEST REPLY - etha adichalum reply varum
+            reply = f"✅ Dinesh Bot LIVE!\nNee anupinathu: {text}\nPrice: {get_price()}"
+            requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": reply}, timeout=15)
+    except Exception as e:
+        print(f"WEBHOOK ERROR: {e}", flush=True)
+        try:
+            # Error vanthalum ithu pakka anupum
+            if 'message' in data:
+                requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json={"chat_id": data['message']['chat']['id'], "text": f"BOT LIVE but error: {e}"}, timeout=10)
+        except: pass
+    return 'ok', 200
