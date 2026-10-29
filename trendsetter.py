@@ -22,13 +22,12 @@ exchange = ccxt.delta({
     'apiKey': DELTA_API_KEY,
     'secret': DELTA_SECRET,
     'enableRateLimit': True,
-    'hostname': 'api.delta.exchange',  # <-- International, because your key is from delta.exchange
+    'hostname': 'api.india.delta.exchange',  # <-- ITHU THAN FIX! India host!
     'options': {
         'defaultType': 'future',
         'defaultSettle': 'USDT'
     }
 })
-
 try:
     exchange.load_markets()
     print(f"✅ Markets loaded: {len(exchange.markets)}")
