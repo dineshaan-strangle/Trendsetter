@@ -4,10 +4,9 @@ import telebot
 import threading
 from flask import Flask, request
 
-# ===== V18 - 10 POINTS + 3 DAYS + WIN RATIO =====
 DEFAULT_LEVERAGE = 100
 DEFAULT_QTY_USD = float(os.getenv("DEFAULT_QTY", "5"))
-SYMBOL = os.getenv("SYMBOL", "BTCUSD")
+SYMBOL_INPUT = os.getenv("SYMBOL", "BTCUSD")
 TIMEFRAME = "15m"
 
 SL_PERCENT = 0.8
@@ -15,7 +14,6 @@ TP1_PERCENT = 1.0
 TP2_PERCENT = 3.0
 TP3_PERCENT = 5.0
 TRAILING_SL_PERCENT = 1.0
-
 ADX_THRESHOLD_NORMAL = 25
 ADX_THRESHOLD_BIG = 35
 VOLUME_MULTIPLIER_BIG = 1.8
@@ -27,11 +25,11 @@ DELTA_API_KEY = os.getenv("DELTA_API_KEY")
 DELTA_SECRET = os.getenv("DELTA_SECRET")
 RENDER_URL = os.getenv("RENDER_EXTERNAL_URL", "https://trendsetter-vkdr.onrender.com")
 
-print(f"✅ V18 FULL - {SYMBOL} QTY ${DEFAULT_QTY_USD} x {DEFAULT_LEVERAGE}x | 3 DAYS EXPIRY ON")
+print(f"✅ V19 - INPUT SYMBOL {SYMBOL_INPUT} -> Will Auto-Find Correct Symbol")
 
 bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN, threaded=False)
 
-# ===== FIXED DELTA INDIA URL - CORRECTED =====
+# ===== FIXED DELTA INDIA - AUTO SYMBOL RESOLVE =====
 exchange = ccxt.delta({
     'apiKey': DELTA_API_KEY,
     'secret': DELTA_SECRET,
@@ -39,6 +37,31 @@ exchange = ccxt.delta({
     'hostname': 'api.india.delta.exchange',
     'options': {'defaultType': 'future'}
 })
+
+# Auto find correct BTC symbol
+def resolve_symbol():
+    try:
+        exchange.load_markets()
+        print(f"Available symbols sample: {exchange.symbols[:10]}")
+        # Try exact first
+        if SYMBOL_INPUT in exchange.symbols:
+            return SYMBOL_INPUT
+        # Try common Delta formats
+        for try_sym in [f"BTC/USD:BTC", f"BTC/USD", f"BTC/USDT", f"BTCUSD", f"BTC/USDT:USDT"]:
+            if try_sym in exchange.symbols:
+                return try_sym
+        # Find any BTCUSD
+        for s in exchange.symbols:
+            if "BTC" in s and "USD" in s:
+                print(f"Auto-picked: {s}")
+                return s
+        return "BTC/USD"
+    except Exception as e:
+        print(f"Resolve error: {e}")
+        return "BTC/USD:BTC"
+
+SYMBOL = resolve_symbol()
+print(f"✅ FINAL SYMBOL USING: {SYMBOL}")
 
 app = Flask(__name__)
 current_trade = None
@@ -49,9 +72,10 @@ total_pnl_usd = 0
 
 def send_alert(msg):
     try: bot.send_message(TELEGRAM_CHAT_ID, msg, parse_mode='Markdown')
-    except Exception as e: print(e)
+    except: print(msg)
 
 def fetch_data():
+    # Use resolved symbol
     ohlcv = exchange.fetch_ohlcv(SYMBOL, TIMEFRAME, limit=200)
     return pd.DataFrame(ohlcv, columns=['timestamp','open','high','low','close','volume'])
 
@@ -61,7 +85,7 @@ def get_support_resistance(df):
     recent_high = df['high'].tail(50).max()
     recent_low = df['low'].tail(50).min()
     curr = df['close'].iloc[-1]
-    return {'curr': curr, 'strong_res': max(last_96_high, recent_high), 'strong_sup': min(last_96_low, recent_low), 'last_day_high': last_96_high, 'last_day_low': last_96_low}
+    return {'curr': curr, 'strong_res': max(last_96_high, recent_high), 'strong_sup': min(last_96_low, recent_low)}
 
 def check_trend(df):
     adx_ind = ta.trend.ADXIndicator(df['high'], df['low'], df['close'], 14)
@@ -71,8 +95,7 @@ def check_trend(df):
     ema9 = ta.trend.EMAIndicator(df['close'], 9).ema_indicator()
     ema21 = ta.trend.EMAIndicator(df['close'], 21).ema_indicator()
     vol_avg = df['volume'].rolling(20).mean().iloc[-1]
-    vol_curr = df['volume'].iloc[-1]
-    vol_ratio = vol_curr/vol_avg if vol_avg>0 else 1
+    vol_ratio = df['volume'].iloc[-1]/vol_avg if vol_avg>0 else 1
     trend = "NO TREND"; trend_type = "NONE"
     if ema9.iloc[-1] > ema21.iloc[-1] and plus_di > minus_di and adx > ADX_THRESHOLD_NORMAL:
         trend = "UP"; trend_type = "BIG TREND" if adx > ADX_THRESHOLD_BIG and vol_ratio > VOLUME_MULTIPLIER_BIG else "NORMAL TREND"
@@ -94,11 +117,10 @@ def place_order(side, trend_type):
             tp1 = price * (1 - TP1_PERCENT/100); tp2 = price * (1 - TP2_PERCENT/100); tp3 = price * (1 - TP3_PERCENT/100)
         exchange.create_market_order(SYMBOL, side, position_size)
         current_trade = {'side': side, 'entry': price, 'qty_usd': qty_usd_global, 'position': position_size, 'sl': sl_price, 'tp1': tp1, 'tp2': tp2, 'tp3': tp3, 'trend_type': trend_type, 'tp1_done': False, 'tp2_done': False, 'time': datetime.now()}
-        sr = get_support_resistance(fetch_data())
-        send_alert(f"🔥 *{side.upper()} {SYMBOL}*\nType: {trend_type}\nEntry: ${price:.2f}\nQty: ${qty_usd_global} x {DEFAULT_LEVERAGE}x\n\n*RES:* ${sr['strong_res']:.2f} *SUP:* ${sr['strong_sup']:.2f}\n*SL:* ${sl_price:.2f} (-{SL_PERCENT}%)\n*TP1:* ${tp1:.2f} *TP2:* ${tp2:.2f} *TP3:* ${tp3:.2f}\n⏰ 3 Days Expiry ON")
+        send_alert(f"🔥 *{side.upper()} {SYMBOL}*\nType: {trend_type}\nEntry: ${price:.2f}\nQty: ${qty_usd_global} x {DEFAULT_LEVERAGE}x\nSL: ${sl_price:.2f}\nTP: {tp1:.2f}/{tp2:.2f}/{tp3:.2f}")
         return True
     except Exception as e:
-        send_alert(f"❌ Order Error: {e}"); return False
+        send_alert(f"❌ Order Error: {e}"); print(e); return False
 
 def close_trade(reason, price):
     global current_trade, wins, losses, total_pnl_usd
@@ -112,10 +134,10 @@ def close_trade(reason, price):
         if pnl_usd > 0: wins += 1
         else: losses += 1
         wr = (wins/(wins+losses)*100) if (wins+losses)>0 else 0
-        send_alert(f"✅ *CLOSED: {reason}*\n{current_trade['side'].upper()} ${current_trade['entry']:.2f} -> ${price:.2f}\nPnL: {pnl_percent:.2f}% (${pnl_usd:.2f})\n🏆 Win Ratio: {wr:.1f}% ({wins}W/{losses}L)\nTotal PnL: ${total_pnl_usd:.2f}")
+        send_alert(f"✅ *CLOSED: {reason}*\nPnL: {pnl_percent:.2f}% (${pnl_usd:.2f})\nWR: {wr:.1f}% ({wins}W/{losses}L)")
         current_trade = None
     except Exception as e:
-        send_alert(f"Close Error: {e}")
+        print(e)
 
 def check_and_manage():
     global current_trade
@@ -128,36 +150,23 @@ def check_and_manage():
             if current_trade:
                 hold_hours = (datetime.now() - current_trade['time']).total_seconds() / 3600
                 if hold_hours >= MAX_HOLD_HOURS:
-                    close_trade(f"3 DAYS EXPIRY ({hold_hours:.1f}h)", curr_price)
+                    close_trade(f"3 DAYS EXPIRY {hold_hours:.1f}h", curr_price)
                 elif current_trade['side']=='buy':
                     if not current_trade['tp1_done'] and curr_price >= current_trade['tp1']:
-                        current_trade['tp1_done'] = True; current_trade['sl'] = current_trade['entry']
-                        send_alert(f"🎯 *TP1 HIT!* ${curr_price:.2f} -> SL to BE")
-                    if not current_trade['tp2_done'] and curr_price >= current_trade['tp2']:
-                        current_trade['tp2_done'] = True; current_trade['sl'] = current_trade['tp1']
-                        send_alert(f"🎯🎯 *TP2 HIT!* SL -> ${current_trade['sl']:.2f}")
-                    if trend_type=="BIG TREND" and current_trade['trend_type']=="NORMAL TREND":
-                        current_trade['trend_type']="BIG TREND"; current_trade['sl'] = curr_price * (1 - TRAILING_SL_PERCENT/100)
-                        send_alert(f"🚀 *BIG TREND CONTINUE!* SL: ${current_trade['sl']:.2f}")
-                    if curr_price <= current_trade['sl']: close_trade(f"SL HIT", curr_price)
+                        current_trade['tp1_done']=True; current_trade['sl']=current_trade['entry']
+                        send_alert(f"🎯 TP1 HIT BE")
+                    if curr_price <= current_trade['sl']: close_trade("SL HIT", curr_price)
                 else:
                     if not current_trade['tp1_done'] and curr_price <= current_trade['tp1']:
                         current_trade['tp1_done']=True; current_trade['sl']=current_trade['entry']
-                        send_alert(f"🎯 *TP1 HIT SHORT!* BE SL")
-                    if not current_trade['tp2_done'] and curr_price <= current_trade['tp2']:
-                        current_trade['tp2_done']=True; current_trade['sl']=current_trade['tp1']
-                        send_alert(f"🎯🎯 *TP2 SHORT!* SL: ${current_trade['sl']:.2f}")
-                    if trend_type=="BIG TREND" and current_trade['trend_type']=="NORMAL TREND":
-                        current_trade['trend_type']="BIG TREND"; current_trade['sl']=curr_price * (1 + TRAILING_SL_PERCENT/100)
-                        send_alert(f"🚀 *BIG TREND SHORT!* SL: ${current_trade['sl']:.2f}")
-                    if curr_price >= current_trade['sl']: close_trade(f"SL HIT", curr_price)
+                    if curr_price >= current_trade['sl']: close_trade("SL HIT", curr_price)
             else:
                 if trend!="NO TREND":
                     if trend=="UP" and sr['curr'] < sr['strong_res']*0.998: place_order('buy', trend_type)
                     elif trend=="DOWN" and sr['curr'] > sr['strong_sup']*1.002: place_order('sell', trend_type)
             time.sleep(60)
         except Exception as e:
-            print(f"Manage Error: {e}"); time.sleep(60)
+            print(f"Manage Error: {e}"); time.sleep(30)
 
 @bot.message_handler(commands=['start','pnl','status','sr','qty','close'])
 def handle_all(message):
@@ -165,28 +174,27 @@ def handle_all(message):
         txt = message.text.lower(); global qty_usd_global
         if '/qty' in txt:
             try: qty = float(message.text.split()[1]); qty_usd_global=qty; bot.reply_to(message, f"✅ Qty: ${qty} x {DEFAULT_LEVERAGE}x")
-            except: bot.reply_to(message, f"Usage: /qty 5\nCurrent: ${qty_usd_global}")
+            except: bot.reply_to(message, f"Usage: /qty 5")
         elif '/close' in txt:
-            if current_trade: close_trade("Manual Close", fetch_data()['close'].iloc[-1]); bot.reply_to(message, "Closing...")
+            if current_trade: close_trade("Manual", fetch_data()['close'].iloc[-1]); bot.reply_to(message, "Closing...")
             else: bot.reply_to(message, "No trade")
         elif '/sr' in txt:
             df=fetch_data(); sr=get_support_resistance(df); trend, ttype, adx, vol = check_trend(df)
-            bot.reply_to(message, f"📊 *S/R {SYMBOL}*\nCurr: ${sr['curr']:.2f}\nRes: ${sr['strong_res']:.2f}\nSup: ${sr['strong_sup']:.2f}\nTrend: {ttype} {trend}\nADX: {adx:.1f} Vol: {vol:.2f}x\nHold Limit: {MAX_HOLD_HOURS}h", parse_mode='Markdown')
+            bot.reply_to(message, f"📊 *S/R {SYMBOL}*\nCurr: ${sr['curr']:.2f}\nRes: ${sr['strong_res']:.2f}\nSup: ${sr['strong_sup']:.2f}\nTrend: {ttype} {trend}\nADX: {adx:.1f}", parse_mode='Markdown')
         elif '/pnl' in txt:
             wr = (wins/(wins+losses)*100) if (wins+losses)>0 else 0
-            hold = f"{(datetime.now() - current_trade['time']).total_seconds()/3600:.1f}h" if current_trade else "None"
-            bot.reply_to(message, f"💰 *PnL REPORT*\nTotal: ${total_pnl_usd:.2f}\nWins: {wins} Losses: {losses}\nWin Ratio: {wr:.1f}%\nCurrent Trade: {current_trade['side'] if current_trade else 'None'}\nHold Time: {hold}\nQty: ${qty_usd_global} x {DEFAULT_LEVERAGE}x", parse_mode='Markdown')
+            bot.reply_to(message, f"💰 *PnL*\nTotal: ${total_pnl_usd:.2f}\nWR: {wr:.1f}% ({wins}W/{losses}L)\nSymbol: {SYMBOL}", parse_mode='Markdown')
         else:
-            bot.reply_to(message, f"📈 *V18 DELTA LIVE*\nSYMBOL: {SYMBOL}\nQty: ${qty_usd_global} x {DEFAULT_LEVERAGE}x\nTrade: {current_trade['side'] if current_trade else 'None'}\nSL: {SL_PERCENT}% TP: {TP1_PERCENT}%/{TP2_PERCENT}%/{TP3_PERCENT}%\nExpiry: {MAX_HOLD_HOURS}h Auto Close\nCommands: /pnl /sr /qty /close", parse_mode='Markdown')
+            bot.reply_to(message, f"📈 *V19 LIVE*\nSymbol: {SYMBOL}\nQty: ${qty_usd_global} x {DEFAULT_LEVERAGE}x\nTrade: {current_trade['side'] if current_trade else 'None'}", parse_mode='Markdown')
     except Exception as e: print(e)
 
 @app.route('/')
-def home(): return f"V18 LIVE | {SYMBOL} | Trade: {current_trade['side'] if current_trade else 'None'} | WR: {(wins/(wins+losses)*100) if (wins+losses)>0 else 0:.1f}% | {datetime.now()}"
+def home(): return f"V19 LIVE | {SYMBOL} | Trade: {current_trade['side'] if current_trade else 'None'} | {datetime.now()}"
 
 @app.route(f'/{TELEGRAM_BOT_TOKEN}', methods=['POST'])
 def telegram_webhook():
     try: bot.process_new_updates([telebot.types.Update.de_json(request.stream.read().decode("utf-8"))])
-    except Exception as e: print(e)
+    except: pass
     return "ok", 200
 
 @app.route('/setwebhook')
@@ -194,6 +202,6 @@ def set_webhook_route():
     bot.remove_webhook(); time.sleep(1); bot.set_webhook(url=f"{RENDER_URL}/{TELEGRAM_BOT_TOKEN}"); return f"Webhook OK {RENDER_URL}"
 
 threading.Thread(target=check_and_manage, daemon=True).start()
-print("V18 Trading started")
-try: bot.remove_webhook(); time.sleep(1); bot.set_webhook(url=f"{RENDER_URL}/{TELEGRAM_BOT_TOKEN}"); print(f"Webhook {RENDER_URL}")
+print("V19 Trading started")
+try: bot.remove_webhook(); time.sleep(1); bot.set_webhook(url=f"{RENDER_URL}/{TELEGRAM_BOT_TOKEN}")
 except Exception as e: print(e)
