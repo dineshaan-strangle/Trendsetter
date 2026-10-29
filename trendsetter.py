@@ -132,12 +132,18 @@ def webhook():
             chat_id = data['message']['chat']['id']
             text = data['message'].get('text','').lower()
             
-            if '/qty' in text:
-                try:
-                    global qty_usd_global
-                    qty_usd_global = float(data['message']['text'].split()[1])
-                    send_reply(chat_id, f"Qty set ${qty_usd_global}")
-                except: send_reply(chat_id, "Usage /qty 5")
+            if '/lev' in text:
+                    try:
+                        global DEFAULT_LEVERAGE
+                        DEFAULT_LEVERAGE = int(data['message']['text'].split()[1])
+                        send_reply(chat_id, f"✅ Leverage set {DEFAULT_LEVERAGE}x\nQty: ${qty_usd_global} x {DEFAULT_LEVERAGE}x")
+                    except: send_reply(chat_id, "Usage: /lev 20")
+                elif '/qty' in text:
+                    try:
+                        global qty_usd_global
+                        qty_usd_global = float(data['message']['text'].split()[1])
+                        send_reply(chat_id, f"Qty set ${qty_usd_global}")
+                    except: send_reply(chat_id, "Usage /qty 5")
             elif '/close' in text:
                 global current_trade
                 if current_trade:
