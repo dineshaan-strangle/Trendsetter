@@ -18,23 +18,47 @@ DELTA_API_KEY = os.getenv("DELTA_API_KEY")
 DELTA_SECRET = os.getenv("DELTA_SECRET")
 RENDER_URL = os.getenv("RENDER_EXTERNAL_URL", "https://trendsetter-vkdr.onrender.com")
 
-print(f"✅ V24 FINAL ORDER FIX!")
+print(f"✅ V25 UNIVERSAL FIX!")
 
 bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN, threaded=False)
 
-exchange = ccxt.delta({
-    'apiKey': DELTA_API_KEY,
-    'secret': DELTA_SECRET,
-    'enableRateLimit': True,
-    'hostname': 'api.india.delta.exchange',
-    'options': {'defaultType': 'future'}
-})
+# ===== UNIVERSAL EXCHANGE - INDIA + INTERNATIONAL AUTO DETECT =====
+def get_exchange():
+    for host in ['api.delta.exchange', 'api.india.delta.exchange']:
+        try:
+            ex = ccxt.delta({
+                'apiKey': DELTA_API_KEY,
+                'secret': DELTA_SECRET,
+                'enableRateLimit': True,
+                'hostname': host,
+                'options': {'defaultType': 'future'}
+            })
+            ex.load_markets()
+            try:
+                bal = ex.fetch_balance()
+                print(f"✅ API VALID on {host}!")
+            except:
+                print(f"✅ Markets loaded on {host} (balance check skip)")
+            return ex
+        except Exception as e:
+            print(f"❌ {host} fail: {e}")
+            continue
+    return None
 
-try:
-    exchange.load_markets()
-    print(f"✅ Markets Loaded: {len(exchange.symbols)}")
-except Exception as e:
-    print(f"Market load fail: {e}")
+exchange = get_exchange()
+if exchange is None:
+    print("❌ Both hosts failed - using default")
+    exchange = ccxt.delta({
+        'apiKey': DELTA_API_KEY,
+        'secret': DELTA_SECRET,
+        'enableRateLimit': True,
+        'hostname': 'api.delta.exchange',
+        'options': {'defaultType': 'future'}
+    })
+    try:
+        exchange.load_markets()
+    except:
+        pass
 
 SYMBOL = "BTC/USDT"
 print(f"✅ SYMBOL: {SYMBOL}")
@@ -50,7 +74,7 @@ def send_alert(msg):
     try:
         bot.send_message(TELEGRAM_CHAT_ID, msg, parse_mode='Markdown')
     except Exception as e:
-        print(f"Alert fail: {e} | {msg}")
+        print(f"Alert fail: {e}")
 
 def fetch_data():
     global cached_df, last_price
@@ -64,40 +88,14 @@ def fetch_data():
                     if len(df) >= 30:
                         cached_df = df
                         last_price = float(df['close'].iloc[-1])
-                        print(f"✅ OHLCV SUCCESS {sym}: {len(df)} Price: {last_price}")
                         return df
-            except Exception as e:
-                print(f"OHLCV {sym} fail: {e}")
+            except:
                 continue
-        
-        try:
-            for sym in ["BTC/USDT", "BTC/USDT:USDT", "BTCUSDT"]:
-                try:
-                    ticker = exchange.fetch_ticker(sym)
-                    if ticker and ticker['last']:
-                        last_price = float(ticker['last'])
-                        print(f"✅ TICKER ONLY {sym}: {last_price}")
-                        break
-                except:
-                    continue
-            if cached_df is not None:
-                return cached_df
-            price = last_price if last_price > 0 else 80000
-            df = pd.DataFrame({
-                'timestamp': [int(time.time()*1000)-i*15*60*1000 for i in range(200)][::-1],
-                'open': [price]*200, 'high': [price*1.005]*200,
-                'low': [price*0.995]*200, 'close': [price]*200, 'volume': [100.0]*200
-            })
-            cached_df = df
-            return df
-        except Exception as e:
-            print(f"Ticker fail: {e}")
-        
         if cached_df is not None:
             return cached_df
         return None
     except Exception as e:
-        print(f"Fetch main error: {e}")
+        print(f"Fetch error: {e}")
         return cached_df
 
 def get_support_resistance(df):
@@ -108,7 +106,7 @@ def get_support_resistance(df):
         res = float(df['high'].tail(96).max())
         sup = float(df['low'].tail(96).min())
         return {'curr': curr, 'strong_res': res, 'strong_sup': sup}
-    except Exception as e:
+    except:
         return {'curr': float(df['close'].iloc[-1]), 'strong_res': float(df['high'].max()), 'strong_sup': float(df['low'].min())}
 
 def check_trend(df):
@@ -127,13 +125,13 @@ def check_trend(df):
         elif ema9 < ema21 and minus_di > plus_di and adx > 25:
             trend = "DOWN"; ttype = "NORMAL"
         return trend, ttype, adx, 1
-    except Exception as e:
+    except:
         return "NO TREND", "NONE", 0, 1
 
 def get_live_price():
     global last_price
     try:
-        for sym in ["BTC/USDT", "BTC/USDT:USDT", "BTCUSDT", "BTC/USD"]:
+        for sym in ["BTC/USDT", "BTC/USDT:USDT", "BTCUSDT"]:
             try:
                 ticker = exchange.fetch_ticker(sym)
                 if ticker and ticker['last'] is not None:
@@ -156,22 +154,19 @@ def place_order(side, trend_type):
     try:
         price = get_live_price()
         if price is None or price == 0:
-            print("No price for order!")
+            print("No price!")
             return False
-
         last_price = price
         position_size = max(1, int((qty_usd_global * DEFAULT_LEVERAGE) / price * 1000))
         sl = price * (1 - SL_PERCENT/100) if side == 'buy' else price * (1 + SL_PERCENT/100)
-        
-        print(f"Placing {side} order Price: {price} Size: {position_size}")
+        print(f"Placing {side} Price: {price} Size: {position_size}")
         exchange.create_market_order(SYMBOL, side, position_size)
-        
         current_trade = {'side': side, 'entry': price, 'position': position_size, 'sl': sl, 'time': datetime.now()}
         send_alert(f"🔥 *{side.upper()} {SYMBOL}*\nEntry: ${price:.2f}\nSL: ${sl:.2f}\nQty: ${qty_usd_global} x {DEFAULT_LEVERAGE}x")
         return True
     except Exception as e:
         send_alert(f"❌ Order Error: {e}")
-        print(f"Order exception: {e}")
+        print(f"Order fail: {e}")
         return False
 
 def close_trade(reason, price):
@@ -181,7 +176,6 @@ def close_trade(reason, price):
             return
         if price is None or price == 0:
             price = get_live_price()
-        
         side = 'sell' if current_trade['side'] == 'buy' else 'buy'
         exchange.create_market_order(SYMBOL, side, current_trade['position'])
         pnl_percent = ((price - current_trade['entry'])/current_trade['entry']*100) if current_trade['side']=='buy' else ((current_trade['entry']-price)/current_trade['entry']*100)
@@ -208,7 +202,7 @@ def check_and_manage():
                 continue
             trend, ttype, adx, vol = check_trend(df)
             curr = sr['curr']
-            print(f"✅ LIVE Check: ${curr:.2f} Trend:{trend} ADX:{adx:.1f}")
+            print(f"✅ LIVE: ${curr:.2f} Trend:{trend} ADX:{adx:.1f}")
             if current_trade:
                 hold = (datetime.now() - current_trade['time']).total_seconds()/3600
                 if hold >= MAX_HOLD_HOURS:
@@ -234,52 +228,48 @@ def handle_all(message):
             try:
                 qty = float(message.text.split()[1])
                 qty_usd_global = qty
-                bot.reply_to(message, f"✅ Qty Updated: ${qty} x {DEFAULT_LEVERAGE}x = ${qty*DEFAULT_LEVERAGE} position")
+                bot.reply_to(message, f"✅ Qty: ${qty} x {DEFAULT_LEVERAGE}x")
             except:
-                bot.reply_to(message, f"Usage: /qty 5\nCurrent: ${qty_usd_global}")
+                bot.reply_to(message, f"Usage: /qty 5 Current: ${qty_usd_global}")
         elif '/leverage' in txt:
             try:
                 lev = int(message.text.split()[1])
                 if 10 <= lev <= 200:
                     DEFAULT_LEVERAGE = lev
-                    bot.reply_to(message, f"✅ Leverage: {lev}x\nQty: ${qty_usd_global} x {lev}x")
+                    bot.reply_to(message, f"✅ Leverage: {lev}x")
                 else:
                     bot.reply_to(message, "Leverage 10-200 only")
             except:
-                bot.reply_to(message, f"Current Leverage: {DEFAULT_LEVERAGE}x\nUsage: /leverage 100")
+                bot.reply_to(message, f"Current: {DEFAULT_LEVERAGE}x Usage: /leverage 100")
         elif '/close' in txt:
             if current_trade:
                 df = fetch_data()
                 price = get_support_resistance(df)['curr'] if df is not None else get_live_price()
                 close_trade("Manual", price)
-                bot.reply_to(message, "Closing trade...")
+                bot.reply_to(message, "Closing...")
             else:
                 bot.reply_to(message, "No open trade")
         elif '/sr' in txt:
             df = fetch_data()
             if df is None:
-                bot.reply_to(message, f"⏳ Data Loading...\nLast Price: ${last_price}\nTry again 10s\nSymbol: {SYMBOL}")
+                bot.reply_to(message, f"⏳ Loading...\nLast: ${last_price}\nSymbol: {SYMBOL}")
                 return
             sr = get_support_resistance(df)
             trend, ttype, adx, vol = check_trend(df)
             bot.reply_to(message, f"📊 *{SYMBOL} LIVE*\n💰 Price: ${sr['curr']:.2f}\n📈 Res: ${sr['strong_res']:.2f}\n📉 Sup: ${sr['strong_sup']:.2f}\nTrend: {ttype} {trend}\nADX: {adx:.1f}\nCandles: {len(df)}", parse_mode='Markdown')
         elif '/pnl' in txt:
             wr = (wins/(wins+losses)*100) if (wins+losses)>0 else 0
-            bot.reply_to(message, f"💰 *PnL Report*\nPnL: ${total_pnl_usd:.2f}\nWR: {wr:.1f}% ({wins}W/{losses}L)\nQty: ${qty_usd_global} x {DEFAULT_LEVERAGE}x\nTrade: {current_trade['side'] if current_trade else 'None'}", parse_mode='Markdown')
+            bot.reply_to(message, f"💰 *PnL*\nPnL: ${total_pnl_usd:.2f}\nWR: {wr:.1f}% ({wins}W/{losses}L)\nTrade: {current_trade['side'] if current_trade else 'None'}", parse_mode='Markdown')
         else:
             df = fetch_data()
             price_str = f"${get_support_resistance(df)['curr']:.2f}" if df is not None else f"${last_price:.2f}" if last_price else "Loading..."
-            bot.reply_to(message, f"📈 *V24 LIVE FIXED!*\nSymbol: {SYMBOL}\nPrice: {price_str}\nQty: ${qty_usd_global} x {DEFAULT_LEVERAGE}x\nTrade: {current_trade['side'] if current_trade else 'None'}\n\nCommands:\n/sr - Market\n/pnl - Profit\n/qty 5 - Set Qty\n/leverage 100 - Set Lev\n/close - Close Trade", parse_mode='Markdown')
+            bot.reply_to(message, f"📈 *V25 UNIVERSAL!*\nSymbol: {SYMBOL}\nPrice: {price_str}\nQty: ${qty_usd_global} x {DEFAULT_LEVERAGE}x\nTrade: {current_trade['side'] if current_trade else 'None'}\n\n/sr /pnl /qty /close", parse_mode='Markdown')
     except Exception as e:
         print(f"Handler error: {e}")
-        try:
-            bot.reply_to(message, f"Error: {e}")
-        except:
-            pass
 
 @app.route('/')
 def home():
-    return f"V24 LIVE FIXED | {SYMBOL} ${last_price} | {datetime.now()} | Trade: {current_trade['side'] if current_trade else 'None'}"
+    return f"V25 UNIVERSAL | {SYMBOL} ${last_price} | {datetime.now()} | Trade: {current_trade['side'] if current_trade else 'None'}"
 
 @app.route(f'/{TELEGRAM_BOT_TOKEN}', methods=['POST'])
 def telegram_webhook():
@@ -298,7 +288,7 @@ def set_webhook_route():
 
 if __name__ == '__main__':
     threading.Thread(target=check_and_manage, daemon=True).start()
-    print("V24 Trading Thread Started")
+    print("V25 Thread Started")
     try:
         bot.remove_webhook()
         time.sleep(1)
