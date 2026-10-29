@@ -20,7 +20,7 @@ exchange = ccxt.delta({
     'apiKey': DELTA_API_KEY,
     'secret': DELTA_SECRET,
     'enableRateLimit': True,
-    'hostname': 'api.delta.exchange',
+    'hostname': 'api.india.delta.exchange',
     'options': {'defaultType': 'future','defaultSettle': 'USDT'}
 })
 
